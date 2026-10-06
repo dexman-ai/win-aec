@@ -758,13 +758,21 @@ impl AudioInputStreamPy {
     ///
     /// `dropped_frames` is `True` when WASAPI reported a discontinuity or when the
     /// caller's buffer was too small to hold the full audio payload.
-    #[pyo3(signature = (buffer, timeout_ms = -1))]
+    ///
+    /// `timeout` is expressed in seconds, with `-1.0` meaning block forever.
+    #[pyo3(signature = (buffer, timeout = -1.0))]
     fn read<'py>(
         &self,
         _py: Python<'py>,
         buffer: &Bound<'py, PyAny>,
-        timeout_ms: i32,
+        timeout: f64,
     ) -> PyResult<(usize, bool)> {
+        let timeout_ms = if !timeout.is_finite() || timeout < 0.0 {
+            -1
+        } else {
+            (timeout * 1000.0).round() as i32
+        };
+
         let (ptr, len, readonly) = to_bytes(buffer, self.inner.bits_per_sample())?;
         if readonly {
             return Err(PyBufferError::new_err("read buffer must be writable"));
@@ -836,15 +844,22 @@ impl AudioOutputStreamPy {
     /// Writes PCM bytes to the output stream.
     ///
     /// `data` may be any Python object that supports the buffer protocol, such as a
-    /// `bytearray`, `memoryview`, or NumPy array. The optional `timeout_ms` follows
-    /// the same semantics as `read`: `-1` blocks until the stream is ready.
-    #[pyo3(signature = (data, timeout_ms = -1))]
+    /// `bytearray`, `memoryview`, or NumPy array. The optional `timeout` is in
+    /// seconds and follows the same semantics as `read`: `-1.0` blocks until the
+    /// stream is ready.
+    #[pyo3(signature = (data, timeout = -1.0))]
     fn write<'py>(
         &self,
         _py: Python<'py>,
         data: &Bound<'py, PyAny>,
-        timeout_ms: i32,
+        timeout: f64,
     ) -> PyResult<usize> {
+        let timeout_ms = if !timeout.is_finite() || timeout < 0.0 {
+            -1
+        } else {
+            (timeout * 1000.0).round() as i32
+        };
+
         let (ptr, len, readonly) = to_bytes(data, self.inner.bits_per_sample())?;
         if readonly {
             return Err(PyBufferError::new_err("write buffer must be readable"));
