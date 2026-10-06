@@ -1,0 +1,27 @@
+[package]
+name = "win-aec"
+version = "0.1.0"
+edition = "2021"
+description = "Windows WASAPI acoustic echo cancellation helpers for communications mode"
+license = "MIT"
+repository = "https://github.com/example/win-aec"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+windows-core = "0.61"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+] }
+pyo3 = { version = "0.23", features = ["extension-module"], optional = true }

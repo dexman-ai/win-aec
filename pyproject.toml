@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "win-aec"
+version = "0.1.0"
+description = "Windows WASAPI acoustic echo cancellation helpers for communications mode"
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+module-name = "win_aec"
+bindings = "pyo3"
+features = ["python"]
