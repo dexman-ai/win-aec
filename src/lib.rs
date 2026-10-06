@@ -124,9 +124,19 @@ impl AudioInputStream {
     /// * `reference_output_id` - Optional render endpoint ID used as the AEC reference,
     ///   for example `"{0.0.0.00000000}.{...}"` or `None` to let Windows choose the
     ///   default loopback/render reference.
-    /// * `sample_rate` - Requested sample rate in Hz, typically `48000`.
-    /// * `channels` - Number of audio channels, typically `1` or `2`.
-    /// * `bits_per_sample` - Bit depth per sample, typically `16` or `32`.
+    /// * `sample_rate` - Requested sample rate in Hz. This is a best-effort request,
+    ///   not a guarantee; the device may negotiate a different value.
+    /// * `channels` - Requested number of audio channels. The negotiated value may be
+    ///   lower or different depending on the device.
+    /// * `bits_per_sample` - Requested bit depth per sample. The actual stream may use
+    ///   a supported fallback such as `16` or `32` bits.
+    ///
+    /// # Negotiated format contract
+    ///
+    /// The constructor may succeed with a format different from the request. Callers
+    /// must inspect `sample_rate()`, `channels()`, and `bits_per_sample()` after
+    /// construction and treat those values as the actual stream format. The read and
+    /// write APIs operate on the negotiated stream format, not on the original request.
     pub fn new(
         mic_id: Option<&str>,
         reference_output_id: Option<&str>,
@@ -155,16 +165,35 @@ impl AudioInputStream {
         };
         unsafe { client2.SetClientProperties(&properties)? };
 
-        let mix_format = MixFormat::new(sample_rate, channels, bits_per_sample);
-        unsafe {
-            client.Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                200_000,
-                0,
-                mix_format.0,
-                None,
-            )?
+        let candidates = negotiate_formats(sample_rate, channels, bits_per_sample);
+        let mut last_err = None;
+        let mut mix_format = None;
+
+        for (candidate_rate, candidate_channels, candidate_bits) in candidates {
+            let candidate = MixFormat::new(candidate_rate, candidate_channels, candidate_bits);
+            match unsafe {
+                client.Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                    200_000,
+                    0,
+                    candidate.0,
+                    None,
+                )
+            } {
+                Ok(()) => {
+                    mix_format = Some(candidate);
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                }
+            }
+        }
+
+        let mix_format = match mix_format {
+            Some(format) => format,
+            None => return Err(last_err.unwrap_or_else(|| windows::core::Error::from(E_NOINTERFACE))),
         };
 
         let echo_cancellation_endpoint_bound = match unsafe {
@@ -349,12 +378,14 @@ pub struct AudioOutputStream {
     client: IAudioClient,
     render: IAudioRenderClient,
     mix_format: MixFormat,
+    event: HANDLE,
 }
 
 impl Drop for AudioOutputStream {
     fn drop(&mut self) {
         unsafe {
             let _ = self.client.Stop();
+            let _ = CloseHandle(self.event);
             CoUninitialize();
         }
     }
@@ -367,9 +398,19 @@ impl AudioOutputStream {
     ///
     /// * `device_id` - Optional device ID for the render endpoint, for example
     ///   `"{0.0.1.00000000}.{...}"` or `None` to use the default playback device.
-    /// * `sample_rate` - Requested sample rate in Hz, typically `48000`.
-    /// * `channels` - Number of output channels, typically `1` or `2`.
-    /// * `bits_per_sample` - Bit depth per sample, typically `16` or `32`.
+    /// * `sample_rate` - Requested sample rate in Hz. This is a best-effort request,
+    ///   not a guarantee; the device may negotiate a different value.
+    /// * `channels` - Requested number of output channels. The negotiated value may be
+    ///   different from the request.
+    /// * `bits_per_sample` - Requested bit depth per sample. The actual stream may use
+    ///   a supported fallback such as `16` or `32` bits.
+    ///
+    /// # Negotiated format contract
+    ///
+    /// The constructor may succeed with a different format from the one requested.
+    /// Callers must inspect `sample_rate()`, `channels()`, and `bits_per_sample()`
+    /// immediately after creation and use the negotiated values for all subsequent
+    /// reads or writes.
     pub fn new(
         device_id: Option<&str>,
         sample_rate: u32,
@@ -397,37 +438,77 @@ impl AudioOutputStream {
         };
         unsafe { client2.SetClientProperties(&properties)? };
 
-        let mix_format = MixFormat::new(sample_rate, channels, bits_per_sample);
-        unsafe {
-            client.Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                200_000,
-                0,
-                mix_format.0,
-                None,
-            )?
+        let candidates = negotiate_formats(sample_rate, channels, bits_per_sample);
+        let mut last_err = None;
+        let mut mix_format = None;
+
+        for (candidate_rate, candidate_channels, candidate_bits) in candidates {
+            let candidate = MixFormat::new(candidate_rate, candidate_channels, candidate_bits);
+            match unsafe {
+                client.Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                    200_000,
+                    0,
+                    candidate.0,
+                    None,
+                )
+            } {
+                Ok(()) => {
+                    mix_format = Some(candidate);
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                }
+            }
+        }
+
+        let mix_format = match mix_format {
+            Some(format) => format,
+            None => return Err(last_err.unwrap_or_else(|| windows::core::Error::from(E_NOINTERFACE))),
         };
 
         let render: IAudioRenderClient = unsafe { client.GetService()? };
+        let event = unsafe { CreateEventW(None, false, false, PCWSTR::null())? };
+        unsafe { client.SetEventHandle(event)? };
         unsafe { client.Start()? };
 
         Ok(Self {
             client,
             render,
             mix_format,
+            event,
         })
     }
 
     /// Writes PCM bytes to the render stream.
     ///
-    /// `data` should contain complete PCM samples in the negotiated format, and the
-    /// caller is responsible for passing a buffer whose length is a whole number of
-    /// frames. For example, 48 kHz stereo 16-bit audio is `2 channels * 2 bytes per
-    /// sample = 4` bytes per frame, so a 960-byte buffer represents 240 frames.
-    pub fn write(&self, data: &[u8]) -> Result<usize> {
+    /// `timeout_ms` follows the same event semantics as `read`:
+    ///
+    /// * `0` - non-blocking: return immediately if the device is not ready
+    /// * `-1` - block until the output event is signaled
+    /// * `> 0` - wait up to that many milliseconds before returning `0`
+    ///
+    /// The return value is the number of bytes actually queued to the WASAPI output
+    /// buffer. The function writes whole frames only, so the caller must ensure the
+    /// payload length is a multiple of the negotiated frame size.
+    pub fn write(&self, data: &[u8], timeout_ms: i32) -> Result<usize> {
         if data.is_empty() {
             return Ok(0);
+        }
+
+        if timeout_ms != 0 {
+            let timeout = if timeout_ms < 0 {
+                INFINITE
+            } else {
+                timeout_ms as u32
+            };
+            let wait_result = unsafe { WaitForSingleObject(self.event, timeout) };
+            if wait_result == WAIT_EVENT(WAIT_TIMEOUT) {
+                return Ok(0);
+            }
+            debug_assert_eq!(wait_result, WAIT_EVENT(WAIT_OBJECT_0));
         }
 
         let bytes_per_frame = unsafe { (*self.mix_format.0).nBlockAlign as usize };
@@ -441,7 +522,6 @@ impl AudioOutputStream {
         }
 
         let buffer = unsafe { self.render.GetBuffer(complete_frames)? };
-
         let written_bytes = complete_frames as usize * bytes_per_frame;
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, written_bytes);
@@ -467,16 +547,126 @@ impl AudioOutputStream {
     }
 }
 
+fn negotiate_formats(
+    requested_sample_rate: u32,
+    requested_channels: u16,
+    requested_bits: u16,
+) -> Vec<(u32, u16, u16)> {
+    let mut formats = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let rates = [
+        requested_sample_rate,
+        48_000,
+        44_100,
+        24_000,
+        22_050,
+        16_000,
+        11_025,
+        8_000,
+    ];
+    let channels = [requested_channels, 2, 1];
+    let bits = [requested_bits, 16, 32];
+
+    for rate in rates {
+        if rate == 0 {
+            continue;
+        }
+        for channel in channels {
+            if channel == 0 {
+                continue;
+            }
+            for bits_per_sample in bits {
+                if bits_per_sample == 0 {
+                    continue;
+                }
+                let key = (rate, channel, bits_per_sample);
+                if seen.insert(key) {
+                    formats.push(key);
+                }
+            }
+        }
+    }
+
+    formats
+}
+
+#[cfg(feature = "python")]
+fn parse_dtype(dtype: &str) -> PyResult<u16> {
+    match dtype.trim().to_ascii_lowercase().as_str() {
+        "int16" | "i16" | "i2" | "s16" => Ok(16),
+        "int32" | "i32" | "i4" | "s32" => Ok(32),
+        _ => Err(PyValueError::new_err(
+            "dtype must be one of the WASAPI PCM types: int16, int32",
+        )),
+    }
+}
+
+#[cfg(feature = "python")]
+fn dtype_name(bits_per_sample: u16) -> &'static str {
+    match bits_per_sample {
+        16 => "int16",
+        32 => "int32",
+        _ => "int16",
+    }
+}
+
 fn to_wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(feature = "python")]
-use pyo3::exceptions::PyOSError;
+use pyo3::buffer::PyBuffer;
+#[cfg(feature = "python")]
+use pyo3::exceptions::{PyBufferError, PyOSError, PyValueError};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
+
 #[cfg(feature = "python")]
-use pyo3::types::PyByteArray;
+fn reject_big_endian(name: &str) -> PyResult<()> {
+    if name.starts_with('>') || name.starts_with('!') {
+        Err(PyValueError::new_err(format!(
+            "big-endian {} buffers are not supported; WASAPI PCM is native little-endian on Windows",
+            name
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "python")]
+fn to_bytes<'py>(
+    obj: &Bound<'py, PyAny>,
+    expected_bits: u16,
+) -> PyResult<(*mut u8, usize, bool)> {
+    if let Ok(buffer) = PyBuffer::<u8>::get(obj) {
+        return Ok((buffer.buf_ptr() as *mut u8, buffer.len_bytes(), buffer.readonly()));
+    }
+
+    match expected_bits {
+        16 => {
+            let buffer = PyBuffer::<i16>::get(obj)?;
+            reject_big_endian(buffer.format().to_str().unwrap_or(""))?;
+            Ok((
+                buffer.buf_ptr() as *mut u8,
+                buffer.len_bytes(),
+                buffer.readonly(),
+            ))
+        }
+        32 => {
+            let buffer = PyBuffer::<i32>::get(obj)?;
+            reject_big_endian(buffer.format().to_str().unwrap_or(""))?;
+            Ok((
+                buffer.buf_ptr() as *mut u8,
+                buffer.len_bytes(),
+                buffer.readonly(),
+            ))
+        }
+        _ => Err(PyValueError::new_err(
+            "dtype must be one of the WASAPI PCM types: int16, int32",
+        )),
+    }
+}
 
 #[cfg(feature = "python")]
 #[pymodule]
@@ -497,17 +687,19 @@ pub struct AudioInputStreamPy {
 impl AudioInputStreamPy {
     /// Creates a Python `AudioInputStream`.
     ///
-    /// Example values: `mic_id=None`, `reference_output_id=None`, `sample_rate=48000`,
-    /// `channels=2`, `bits_per_sample=16`.
+    /// The constructor uses a best-effort request and may negotiate a different format
+    /// on the device. After creation, check `sample_rate`, `channels`, and `dtype`
+    /// before reading and use those values as the actual stream format.
     #[new]
-    #[pyo3(signature = (mic_id=None, reference_output_id=None, sample_rate=48_000, channels=2, bits_per_sample=32))]
+    #[pyo3(signature = (mic_id=None, reference_output_id=None, sample_rate=48_000, channels=2, dtype="int32"))]
     fn new(
         mic_id: Option<&str>,
         reference_output_id: Option<&str>,
         sample_rate: u32,
-        channels: u16,
-        bits_per_sample: u16,
+        channels: u16,  
+        dtype: &str,
     ) -> PyResult<Self> {
+        let bits_per_sample = parse_dtype(dtype)?;
         Ok(Self {
             inner: AudioInputStream::new(
                 mic_id,
@@ -532,6 +724,12 @@ impl AudioInputStreamPy {
         self.inner.channels()
     }
 
+    /// Returns the sample dtype, for example `"int16"` or `"int32"`.
+    #[getter]
+    fn dtype(&self) -> &'static str {
+        dtype_name(self.inner.bits_per_sample())
+    }
+
     /// Returns the bit depth per sample, for example `16` or `32`.
     #[getter]
     fn bits_per_sample(&self) -> u16 {
@@ -552,29 +750,30 @@ impl AudioInputStreamPy {
         self.inner.echo_cancellation_endpoint_bound()
     }
 
-    /// Reads PCM bytes from the input stream into a caller-provided buffer.
+    /// Reads PCM samples from the input stream into a caller-provided buffer.
     ///
-    /// `buffer` must be a mutable `bytearray` large enough to hold the bytes you
-    /// want to read. The function fills the buffer in place and returns a tuple:
-    /// `(bytes_read, dropped_frames)`.
+    /// `buffer` may be any writable Python object that supports the buffer protocol,
+    /// such as a `bytearray`, `memoryview`, or NumPy array. The function fills the
+    /// buffer in place and returns a tuple: `(bytes_read, dropped_frames)`.
     ///
     /// `dropped_frames` is `True` when WASAPI reported a discontinuity or when the
     /// caller's buffer was too small to hold the full audio payload.
-    ///
-    /// Example: `read(bytearray(4096))` blocks until audio is ready,
-    /// `read(bytearray(4096), 0)` polls without blocking, and
-    /// `read(bytearray(4096), 250)` waits up to 250 milliseconds.
     #[pyo3(signature = (buffer, timeout_ms = -1))]
     fn read<'py>(
         &self,
         _py: Python<'py>,
-        buffer: &Bound<'py, PyByteArray>,
+        buffer: &Bound<'py, PyAny>,
         timeout_ms: i32,
     ) -> PyResult<(usize, bool)> {
+        let (ptr, len, readonly) = to_bytes(buffer, self.inner.bits_per_sample())?;
+        if readonly {
+            return Err(PyBufferError::new_err("read buffer must be writable"));
+        }
+
         let result = {
-            let mut writable = unsafe { buffer.as_bytes_mut() };
+            let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
             self.inner
-                .read(&mut writable, timeout_ms)
+                .read(slice, timeout_ms)
                 .map_err(|err| PyOSError::new_err(err.to_string()))?
         };
         Ok((result.bytes_read, result.dropped_frames))
@@ -592,16 +791,18 @@ pub struct AudioOutputStreamPy {
 impl AudioOutputStreamPy {
     /// Creates a Python `AudioOutputStream`.
     ///
-    /// Example values: `device_id=None`, `sample_rate=48000`, `channels=2`,
-    /// `bits_per_sample=16`.
+    /// The constructor uses a best-effort request and may negotiate a different format
+    /// on the device. After creation, check `sample_rate`, `channels`, and `dtype`
+    /// before writing and use those values as the actual stream format.
     #[new]
-    #[pyo3(signature = (device_id=None, sample_rate=48_000, channels=2, bits_per_sample=32))]
+    #[pyo3(signature = (device_id=None, sample_rate=48_000, channels=2, dtype="int32"))]
     fn new(
         device_id: Option<&str>,
         sample_rate: u32,
         channels: u16,
-        bits_per_sample: u16,
+        dtype: &str,
     ) -> PyResult<Self> {
+        let bits_per_sample = parse_dtype(dtype)?;
         Ok(Self {
             inner: AudioOutputStream::new(device_id, sample_rate, channels, bits_per_sample)
                 .map_err(|err| PyOSError::new_err(err.to_string()))?,
@@ -620,6 +821,12 @@ impl AudioOutputStreamPy {
         self.inner.channels()
     }
 
+    /// Returns the sample dtype, for example `"int16"` or `"int32"`.
+    #[getter]
+    fn dtype(&self) -> &'static str {
+        dtype_name(self.inner.bits_per_sample())
+    }
+
     /// Returns the bit depth per sample, for example `16` or `32`.
     #[getter]
     fn bits_per_sample(&self) -> u16 {
@@ -628,12 +835,24 @@ impl AudioOutputStreamPy {
 
     /// Writes PCM bytes to the output stream.
     ///
-    /// `data` should contain complete PCM samples in the negotiated format. For
-    /// example, a stereo 16-bit wave buffer is `2 channels * 2 bytes = 4` bytes per
-    /// frame, so the payload should be a whole number of frames.
-    fn write(&self, data: &[u8]) -> PyResult<usize> {
+    /// `data` may be any Python object that supports the buffer protocol, such as a
+    /// `bytearray`, `memoryview`, or NumPy array. The optional `timeout_ms` follows
+    /// the same semantics as `read`: `-1` blocks until the stream is ready.
+    #[pyo3(signature = (data, timeout_ms = -1))]
+    fn write<'py>(
+        &self,
+        _py: Python<'py>,
+        data: &Bound<'py, PyAny>,
+        timeout_ms: i32,
+    ) -> PyResult<usize> {
+        let (ptr, len, readonly) = to_bytes(data, self.inner.bits_per_sample())?;
+        if readonly {
+            return Err(PyBufferError::new_err("write buffer must be readable"));
+        }
+
+        let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
         self.inner
-            .write(data)
+            .write(slice, timeout_ms)
             .map_err(|err| PyOSError::new_err(err.to_string()))
     }
 }
