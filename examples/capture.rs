@@ -11,18 +11,17 @@ fn main() -> windows::core::Result<()> {
         capture.bits_per_sample()
     );
     println!(
+        "capture buffer size: {} bytes",
+        capture.buffer_size()
+    );
+    println!(
         "echo cancellation endpoint explicitly bound: {}",
         capture.echo_cancellation_endpoint_bound()
     );
 
     for packet_index in 0..10 {
-        let bytes_read = capture.read(&mut my_buf, 0)?;
-        if bytes_read == 0 {
-            println!("packet {packet_index}: no audio data yet");
-            continue;
-        }
-
-        println!("packet {packet_index}: bytes={bytes_read}");
+        let res = capture.read(&mut my_buf, -1)?;
+        println!("packet {packet_index}: bytes={}, dropped_frames={}", res.bytes_read, res.dropped_frames);
     }
 
     Ok(())

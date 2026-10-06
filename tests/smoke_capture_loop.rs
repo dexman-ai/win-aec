@@ -20,15 +20,15 @@ fn smoke_capture_api() {
     let mut max_read = 0usize;
 
     for _ in 0..10 {
-        let bytes_read = capture
+        let res = capture
             .read(&mut buffer, 0)
             .expect("capture packet read should not fail while the stream is active");
 
         assert!(
-            bytes_read <= buffer.len(),
+            res.bytes_read <= buffer.len(),
             "read should never exceed the caller-provided buffer"
         );
-        max_read = max_read.max(bytes_read);
+        max_read = max_read.max(res.bytes_read);
     }
 
     // Idle devices are valid; the stream remains usable even when it produces 0-byte
