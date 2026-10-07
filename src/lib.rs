@@ -15,7 +15,9 @@
 
 use std::mem::size_of;
 
-use windows::Win32::Foundation::{CloseHandle, E_NOINTERFACE, HANDLE, WAIT_EVENT};
+use windows::Win32::Foundation::{
+    CloseHandle, E_NOINTERFACE, HANDLE, RPC_E_CHANGED_MODE, WAIT_EVENT,
+};
 use windows::Win32::Media::Audio::{
     eCapture, eConsole, eRender, AudioCategory_Communications, AudioClientProperties,
     AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_SHAREMODE_SHARED,
@@ -52,6 +54,39 @@ mod bindings {
             &self,
             endpoint_id: PCWSTR,
         ) -> HRESULT;
+    }
+}
+
+/// Initializes COM on the current thread for the lifetime of the guard.
+///
+/// If the thread was already initialized with a different apartment model (for
+/// example STA by a GUI toolkit or another library), COM is still usable, so the
+/// existing mode is kept and no matching `CoUninitialize` is issued.
+struct ComGuard {
+    initialized: bool,
+    // CoUninitialize must run on the initializing thread, so the guard is !Send.
+    _prevent_send: std::marker::PhantomData<*const ()>,
+}
+
+impl ComGuard {
+    fn new() -> Result<Self> {
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        let initialized = hr != RPC_E_CHANGED_MODE;
+        if initialized {
+            hr.ok()?;
+        }
+        Ok(Self {
+            initialized,
+            _prevent_send: std::marker::PhantomData,
+        })
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.initialized {
+            unsafe { CoUninitialize() };
+        }
     }
 }
 
@@ -98,6 +133,8 @@ pub struct AudioInputStream {
     mix_format: MixFormat,
     echo_cancellation_endpoint_bound: bool,
     event: HANDLE,
+    // Must stay last so COM is uninitialized after the interfaces are released.
+    _com: ComGuard,
 }
 
 impl Drop for AudioInputStream {
@@ -105,7 +142,6 @@ impl Drop for AudioInputStream {
         unsafe {
             let _ = self.client.Stop();
             let _ = CloseHandle(self.event);
-            CoUninitialize();
         }
     }
 }
@@ -144,7 +180,7 @@ impl AudioInputStream {
         channels: u16,
         bits_per_sample: u16,
     ) -> Result<Self> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
+        let com = ComGuard::new()?;
 
         let enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
@@ -232,6 +268,7 @@ impl AudioInputStream {
             mix_format,
             echo_cancellation_endpoint_bound,
             event,
+            _com: com,
         })
     }
 
@@ -379,6 +416,8 @@ pub struct AudioOutputStream {
     render: IAudioRenderClient,
     mix_format: MixFormat,
     event: HANDLE,
+    // Must stay last so COM is uninitialized after the interfaces are released.
+    _com: ComGuard,
 }
 
 impl Drop for AudioOutputStream {
@@ -386,7 +425,6 @@ impl Drop for AudioOutputStream {
         unsafe {
             let _ = self.client.Stop();
             let _ = CloseHandle(self.event);
-            CoUninitialize();
         }
     }
 }
@@ -417,7 +455,7 @@ impl AudioOutputStream {
         channels: u16,
         bits_per_sample: u16,
     ) -> Result<Self> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
+        let com = ComGuard::new()?;
 
         let enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
@@ -479,6 +517,7 @@ impl AudioOutputStream {
             render,
             mix_format,
             event,
+            _com: com,
         })
     }
 
