@@ -2,7 +2,7 @@ use win_aec::{AudioInputStream, AudioOutputStream};
 
 #[test]
 fn smoke_capture_api() {
-    let capture = match AudioInputStream::new(None, None, 48_000, 2, 32) {
+    let capture = match AudioInputStream::new(None, None, 48_000, 2, 16) {
         Ok(capture) => capture,
         Err(err) => {
             eprintln!(
@@ -38,7 +38,7 @@ fn smoke_capture_api() {
 
 #[test]
 fn smoke_render_api_falls_back_for_unsupported_format() {
-    let render = match AudioOutputStream::new(None, 44_000, 2, 32) {
+    let render = match AudioOutputStream::new(None, 44_000, 2, 16) {
         Ok(render) => render,
         Err(err) => {
             eprintln!(

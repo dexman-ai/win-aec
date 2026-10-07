@@ -1,7 +1,7 @@
 use win_aec::AudioInputStream;
 
 fn main() -> windows::core::Result<()> {
-    let capture = AudioInputStream::new(None, None, 48_000, 2, 32)?;
+    let capture = AudioInputStream::new(None, None, 48_000, 2, 16)?;
     let mut my_buf = vec![0u8; 4096];
 
     println!(

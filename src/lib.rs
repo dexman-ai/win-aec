@@ -491,14 +491,28 @@ impl AudioOutputStream {
     /// * `> 0` - wait up to that many milliseconds before returning `0`
     ///
     /// The return value is the number of bytes actually queued to the WASAPI output
-    /// buffer. The function writes whole frames only, so the caller must ensure the
-    /// payload length is a multiple of the negotiated frame size.
+    /// buffer. At most the currently free buffer space is written, so the result may
+    /// be smaller than `data.len()`; the caller must resubmit the remainder. Only
+    /// whole frames are written.
     pub fn write(&self, data: &[u8], timeout_ms: i32) -> Result<usize> {
         if data.is_empty() {
             return Ok(0);
         }
 
-        if timeout_ms != 0 {
+        let bytes_per_frame = unsafe { (*self.mix_format.0).nBlockAlign as usize };
+        if bytes_per_frame == 0 {
+            return Ok(0);
+        }
+
+        let buffer_frames = unsafe { self.client.GetBufferSize().unwrap_or(0) };
+        if buffer_frames == 0 {
+            return Ok(0);
+        }
+
+        let padding_frames = unsafe { self.client.GetCurrentPadding()? };
+        let mut available_frames = buffer_frames.saturating_sub(padding_frames);
+
+        if timeout_ms != 0 && available_frames == 0 {
             let timeout = if timeout_ms < 0 {
                 INFINITE
             } else {
@@ -509,26 +523,26 @@ impl AudioOutputStream {
                 return Ok(0);
             }
             debug_assert_eq!(wait_result, WAIT_EVENT(WAIT_OBJECT_0));
+
+            let padding_frames = unsafe { self.client.GetCurrentPadding()? };
+            available_frames = buffer_frames.saturating_sub(padding_frames);
         }
 
-        let bytes_per_frame = unsafe { (*self.mix_format.0).nBlockAlign as usize };
-        if bytes_per_frame == 0 {
+        let max_bytes = available_frames as usize * bytes_per_frame;
+        let written_bytes = data.len().min(max_bytes);
+        let aligned_bytes = written_bytes - (written_bytes % bytes_per_frame);
+        if aligned_bytes == 0 {
             return Ok(0);
         }
 
-        let complete_frames = (data.len() / bytes_per_frame) as u32;
-        if complete_frames == 0 {
-            return Ok(0);
-        }
-
-        let buffer = unsafe { self.render.GetBuffer(complete_frames)? };
-        let written_bytes = complete_frames as usize * bytes_per_frame;
+        let frames = (aligned_bytes / bytes_per_frame) as u32;
+        let buffer = unsafe { self.render.GetBuffer(frames)? };
         unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, written_bytes);
-            self.render.ReleaseBuffer(complete_frames, 0)?;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, aligned_bytes);
+            self.render.ReleaseBuffer(frames, 0)?;
         }
 
-        Ok(written_bytes)
+        Ok(aligned_bytes)
     }
 
     /// Returns the negotiated sample rate in Hz.
@@ -846,7 +860,11 @@ impl AudioOutputStreamPy {
     /// `data` may be any Python object that supports the buffer protocol, such as a
     /// `bytearray`, `memoryview`, or NumPy array. The optional `timeout` is in
     /// seconds and follows the same semantics as `read`: `-1.0` blocks until the
-    /// stream is ready.
+    /// stream has free space.
+    ///
+    /// Returns the number of samples written, in `dtype` units (e.g. int16 values,
+    /// counting every channel). This may be less than the input length; the caller
+    /// must resubmit the remainder, e.g. `data = data[written:]`.
     #[pyo3(signature = (data, timeout = -1.0))]
     fn write<'py>(
         &self,
@@ -860,15 +878,23 @@ impl AudioOutputStreamPy {
             (timeout * 1000.0).round() as i32
         };
 
-        let (ptr, len, readonly) = to_bytes(data, self.inner.bits_per_sample())?;
-        if readonly {
-            return Err(PyBufferError::new_err("write buffer must be readable"));
-        }
+        let (ptr, len, _readonly) = match to_bytes(data, self.inner.bits_per_sample()) {
+            Ok(value) => value,
+            Err(_) => {
+                return Err(PyBufferError::new_err(
+                    "write requires a readable bytes-like object; pass bytes, bytearray, memoryview, NumPy arrays, or a contiguous chunk instead.",
+                ));
+            }
+        };
 
         let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-        self.inner
+        let written_bytes = self
+            .inner
             .write(slice, timeout_ms)
-            .map_err(|err| PyOSError::new_err(err.to_string()))
+            .map_err(|err| PyOSError::new_err(err.to_string()))?;
+
+        let sample_bytes = (self.inner.bits_per_sample() as usize / 8).max(1);
+        Ok(written_bytes / sample_bytes)
     }
 }
 
