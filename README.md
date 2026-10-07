@@ -56,7 +56,7 @@ fn main() -> windows::core::Result<()> {
 
 ## Notes
 
-- The requested audio format is only a best-effort hint. WASAPI may negotiate a different sample rate, channel count, or bit depth. Callers must check the actual values from `sample_rate()`, `channels()`, and `bits_per_sample()` (or Python `sample_rate`, `channels`, and `dtype`) after construction, adn perform conversion as needed.
+- The requested audio format is only a best-effort hint. WASAPI may negotiate a different sample rate, channel count, or bit depth. Callers must check the actual values from `sample_rate()`, `channels()`, and `bits_per_sample()` (or Python `sample_rate`, `channels`, and `dtype`) after construction, and perform conversion as needed.
 
 - `read(&mut buffer, timeout_ms)` drains all currently queued WASAPI packets into the caller buffer up to the buffer size. If the queue contains more audio than the caller buffer can hold, the function copies as much as fits and sets `dropped_frames` to `True`.
 
