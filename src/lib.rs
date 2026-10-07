@@ -807,11 +807,12 @@ impl AudioInputStreamPy {
     ///
     /// `buffer` may be any writable Python object that supports the buffer protocol,
     /// such as a `bytearray`, `memoryview`, or NumPy array. The function fills the
-    /// buffer in place and returns a tuple: `(bytes_read, dropped_frames)`.
+    /// buffer in place and returns a tuple: `(elements_read, dropped_frames)`.
     ///
     /// `dropped_frames` is `True` when WASAPI reported a discontinuity or when the
     /// caller's buffer was too small to hold the full audio payload.
     ///
+    /// `elements_read` is counted in `dtype` units, for example int16 values.
     /// `timeout` is expressed in seconds, with `-1.0` meaning block forever.
     #[pyo3(signature = (buffer, timeout = -1.0))]
     fn read<'py>(
@@ -837,7 +838,9 @@ impl AudioInputStreamPy {
                 .read(slice, timeout_ms)
                 .map_err(|err| PyOSError::new_err(err.to_string()))?
         };
-        Ok((result.bytes_read, result.dropped_frames))
+
+        let sample_bytes = (self.inner.bits_per_sample() as usize / 8).max(1);
+        Ok((result.bytes_read / sample_bytes, result.dropped_frames))
     }
 }
 
