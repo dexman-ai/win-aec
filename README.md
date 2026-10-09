@@ -1,18 +1,13 @@
 # win-aec
 
-Audio capture (and output) with echo cancellation. Windows-only (WASAPI).
+Audio capture (and output) with OS-level Acoustic Echo Cancellation. Windows-only (WASAPI).
 
-It is designed for Windows voice agents, real-time assistive capture, and wake-word/barge-in scenarios where the OS-level communications pipeline is preferred over a custom audio stack.
+Enables agents to hear the user, not their own audio output. Useful in scenarios where offloading AEC to the OS-level communications pipeline is preferred over a user-space audio stack.
 
+Provides Python and Rust access to built‑in AEC in Windows (the same one used by MS products like Teams), with correct WASAPI integration and minimal latency. 
 
-Simply instantiate `AudioInputStream` and/or `AudioOutputStream` and call their only method (`read` and `write` respectively).
-
-`AudioInputStream` performs the following operations:
-- sets the audio client category to `AudioCategory_Communications` to enable built-in echo cancellation
-- initializes streams in WASAPI shared mode
-- optionally binds the capture path to a reference render endpoint (output) via `IAcousticEchoCancellationControl`. Needed when the output is not the default one. 
-
-## Example
+## Usage:
+Simply instantiate `AudioInputStream` and/or `AudioOutputStream` and call their only method (`read` and `write` respectively). `AudioInputStream` allows specifying the output renderer to cancel.
 
 ### Python:
 ```python
@@ -56,7 +51,7 @@ fn main() -> windows::core::Result<()> {
 
 ## Notes
 
-- The requested audio format is only a best-effort hint. WASAPI may negotiate a different sample rate, channel count, or bit depth. Callers must check the actual values from `sample_rate()`, `channels()`, and `bits_per_sample()` (or Python `sample_rate`, `channels`, and `dtype`) after construction, adn perform conversion as needed.
+- The requested audio format is only a best-effort hint. WASAPI may negotiate a different sample rate, channel count, or bit depth. Callers must check the actual values from `sample_rate()`, `channels()`, and `bits_per_sample()` (or Python `sample_rate`, `channels`, and `dtype`) after construction, and perform conversion as needed.
 
 - `read(&mut buffer, timeout_ms)` drains all currently queued WASAPI packets into the caller buffer up to the buffer size. If the queue contains more audio than the caller buffer can hold, the function copies as much as fits and sets `dropped_frames` to `True`.
 
