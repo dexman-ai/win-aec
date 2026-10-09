@@ -1,6 +1,8 @@
 # win-aec
 
-OS-level audio capture (and output) with echo cancellation. Windows-only (WASAPI).
+Audio capture (and output) with OS-level Acoustic Echo Cancellation. Windows-only (WASAPI).
+
+Enables agents to hear the user, not their own audio output. 
 
 Provides Python and Rust access to built‑in AEC in Windows (the same one used by MS products like Teams), with correct WASAPI integration and minimal latency.
 
