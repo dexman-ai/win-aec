@@ -2,20 +2,12 @@
 
 Audio capture (and output) with OS-level Acoustic Echo Cancellation. Windows-only (WASAPI).
 
-Enables agents to hear the user, not their own audio output. 
+Enables agents to hear the user, not their own audio output. Useful in scenarios where offloading AEC to the OS-level communications pipeline is preferred over a user-space audio stack.
 
-Provides Python and Rust access to built‑in AEC in Windows (the same one used by MS products like Teams), with correct WASAPI integration and minimal latency.
+Provides Python and Rust access to built‑in AEC in Windows (the same one used by MS products like Teams), with correct WASAPI integration and minimal latency. 
 
-It is designed for voice agents, real-time assistive capture, and wake-word/barge-in scenarios where offloading AEC to the OS-level communications pipeline is preferred over a custom audio stack.
-
-Simply instantiate `AudioInputStream` and/or `AudioOutputStream` and call their only method (`read` and `write` respectively).
-
-`AudioInputStream` performs the following operations:
-- sets the audio client category to `AudioCategory_Communications` to enable built-in echo cancellation
-- initializes streams in WASAPI shared mode
-- optionally binds the capture path to a reference render endpoint (output) via `IAcousticEchoCancellationControl`. Needed when the output is not the default one. 
-
-## Example
+## Usage:
+Simply instantiate `AudioInputStream` and/or `AudioOutputStream` and call their only method (`read` and `write` respectively). `AudioInputStream` allows specifying the output renderer to cancel.
 
 ### Python:
 ```python
