@@ -1,9 +1,10 @@
 # win-aec
 
-Audio capture (and output) with echo cancellation. Windows-only (WASAPI).
+OS-level audio capture (and output) with echo cancellation. Windows-only (WASAPI).
 
-It is designed for Windows voice agents, real-time assistive capture, and wake-word/barge-in scenarios where the OS-level communications pipeline is preferred over a custom audio stack.
+Provides Python and Rust access to built‑in AEC in Windows (the same one used by MS products like Teams), with correct WASAPI integration and minimal latency.
 
+It is designed for voice agents, real-time assistive capture, and wake-word/barge-in scenarios where offloading AEC to the OS-level communications pipeline is preferred over a custom audio stack.
 
 Simply instantiate `AudioInputStream` and/or `AudioOutputStream` and call their only method (`read` and `write` respectively).
 
